@@ -1,0 +1,20 @@
+# Ignore dataset folders
+dataset/
+train/
+val/
+
+# Ignore images
+*.jpg
+*.png
+*.jpeg
+
+# Ignore trained models
+*.pth
+*.pt
+
+# Ignore virtual environment
+venv/
+.env
+
+# Ignore Python cache
+__pycache__/
