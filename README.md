@@ -1,3 +1,4 @@
+
 # Real-Time Image Classification API
 
 A production-ready FastAPI application for real-time classification of Aadhaar and PAN documents using PyTorch and ResNet18.

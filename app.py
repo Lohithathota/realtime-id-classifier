@@ -26,6 +26,8 @@ from utils import load_model, preprocess_image, predict, check_filename_match, D
 
 # Configuration
 MODEL_PATH = "model.pth"
+CONFIDENCE_THRESHOLD_LOW = 0.50  # Below this is strictly Unknown
+CONFIDENCE_THRESHOLD_HIGH = 0.70 # Below this triggers a low confidence warning
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -172,20 +174,45 @@ async def predict_image(file: UploadFile = File(...)) -> Dict[str, Any]:
         display_name = DISPLAY_NAMES.get(class_idx, predicted_class)
         
         # Determine if it's a valid document (not "other")
+        # Determine if it's a valid document (not "other")
         is_document = predicted_class != "other"
         
         # Check if filename matches prediction
         filename_match = check_filename_match(file.filename if file.filename else "unknown", predicted_class)
         
         message = ""
-        if predicted_class == "other":
-            message = "Unknown or unsupported document type"
-        elif predicted_class == "aadhaar":
-            message = "Valid Aadhaar document detected"
-        elif predicted_class == "pan":
-            message = "Valid PAN document detected"
-        elif predicted_class == "payment_receipt":
-            message = "Valid Payment Receipt detected"
+        
+        # --- CONFIDENCE THRESHOLD LOGIC ---
+        if confidence < CONFIDENCE_THRESHOLD_LOW:
+            # Case 1: Confidence is too low (< 50%). Treat as Unknown.
+            predicted_class = "other"
+            display_name = DISPLAY_NAMES[1] # "Unknown / Not Supported Document"
+            is_document = False
+            message = "Confidence too low. Classified as Unknown/Unsupported."
+            
+        elif confidence < CONFIDENCE_THRESHOLD_HIGH:
+            # Case 2: Confidence is medium (50% - 70%). Keep class but warn user.
+            low_conf_warning = " (Low Confidence - Verify Manually)"
+            
+            if predicted_class == "other":
+                message = "Unknown or unsupported document type" + low_conf_warning
+            elif predicted_class == "aadhaar":
+                message = "Valid Aadhaar document detected" + low_conf_warning
+            elif predicted_class == "pan":
+                message = "Valid PAN document detected" + low_conf_warning
+            elif predicted_class == "payment_receipt":
+                message = "Valid Payment Receipt detected" + low_conf_warning
+                
+        else:
+            # Case 3: High Confidence (>= 70%). Standard success messages.
+            if predicted_class == "other":
+                message = "Unknown or unsupported document type"
+            elif predicted_class == "aadhaar":
+                message = "Valid Aadhaar document detected"
+            elif predicted_class == "pan":
+                message = "Valid PAN document detected"
+            elif predicted_class == "payment_receipt":
+                message = "Valid Payment Receipt detected"
         
         # Convert confidence to percentage
         confidence_percentage = round(confidence * 100, 2)
