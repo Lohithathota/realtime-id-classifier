@@ -2,214 +2,144 @@ import os
 import random
 import string
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 from multiprocessing import Pool, cpu_count
+import re
 
-# output directories
+# ================= CONFIG =================
 DATASET_DIR = Path("dataset/train")
 CLASSES = ["aadhaar", "pan", "payment_receipt", "other"]
 IMAGES_PER_CLASS = 1000
 
 # Ensure directories exist
-for class_name in CLASSES:
-    (DATASET_DIR / class_name).mkdir(parents=True, exist_ok=True)
+for cls in CLASSES:
+    (DATASET_DIR / cls).mkdir(parents=True, exist_ok=True)
 
+# ================= GLOBAL UNIQUE STORAGE =================
+USED_AADHAAR = set()
+USED_PAN = set()
+
+# ================= UTILITIES =================
 def random_color():
-    return (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-
-def random_text(length=10, digits=False):
-    chars = string.digits if digits else string.ascii_uppercase + " "
-    return ''.join(random.choices(chars, k=length))
+    return tuple(random.randint(0, 255) for _ in range(3))
 
 def random_date():
-    day = random.randint(1, 28)
-    month = random.randint(1, 12)
-    year = random.randint(1960, 2025)
-    return f"{day:02d}/{month:02d}/{year}"
+    return f"{random.randint(1,28):02d}/{random.randint(1,12):02d}/{random.randint(1960,2005)}"
 
-def get_random_font(size=20):
-    # Try to load a standard font, fallback to default
+def get_font(size):
     try:
-        # Windows standard fonts
-        fonts = ["arial.ttf", "segoeui.ttf", "calibri.ttf", "tahoma.ttf", "verdana.ttf"]
-        font_name = random.choice(fonts)
-        return ImageFont.truetype(font_name, size)
+        return ImageFont.truetype("arial.ttf", size)
     except:
         return ImageFont.load_default()
 
-def create_aadhaar(index):
-    # 1. Background
-    bg_color = (random.randint(230, 255), random.randint(230, 255), random.randint(230, 255))
-    img = Image.new('RGB', (400, 250), bg_color)
-    draw = ImageDraw.Draw(img)
-    
-    # 2. Header (India Flag colors or solid)
-    if random.choice([True, False]):
-        draw.rectangle([(0, 0), (400, 40)], fill=(255, 153, 51)) # Saffron
-        draw.rectangle([(0, 40), (400, 50)], fill=(255, 255, 255)) # White
-        draw.rectangle([(0, 50), (400, 60)], fill=(19, 136, 8)) # Green
-    else:
-        draw.rectangle([(0,0), (400, 50)], fill=random_color())
+# ================= VALIDATION =================
+def generate_unique_aadhaar():
+    while True:
+        num = "".join(random.choices(string.digits, k=12))
+        if num not in USED_AADHAAR:
+            USED_AADHAAR.add(num)
+            return f"{num[:4]} {num[4:8]} {num[8:]}"
 
-    # 3. Photo Placeholder
-    photo_x = random.randint(10, 30)
-    photo_y = random.randint(70, 90)
-    draw.rectangle([(photo_x, photo_y), (photo_x+80, photo_y+100)], fill=(200, 200, 200), outline="black")
-    
-    # 4. Text Content (Name, DOB, Gender)
-    font_main = get_random_font(18)
-    font_small = get_random_font(14)
-    font_number = get_random_font(24)
-    
-    text_x = photo_x + 100
-    draw.text((text_x, 80), random_text(15).title(), font=font_main, fill="black")
-    draw.text((text_x, 110), f"DOB: {random_date()}", font=font_small, fill="black")
-    draw.text((text_x, 135), random.choice(["MALE", "FEMALE"]), font=font_small, fill="black")
-    
-    # 5. Aadhaar Number (Unique feature: 4 4 4 digits)
-    aadhaar_num = f"{random_text(4, True)} {random_text(4, True)} {random_text(4, True)}"
-    draw.text((80, 210), aadhaar_num, font=font_number, fill="black")
-    
-    # 6. Noise/Texture overlay
-    if random.random() > 0.5:
-        # Add a random line or shape
-        draw.line([(random.randint(0,400), random.randint(0,250)), (random.randint(0,400), random.randint(0,250))], fill=random_color(), width=1)
+def generate_unique_pan():
+    while True:
+        pan = (
+            "".join(random.choices(string.ascii_uppercase, k=5)) +
+            "".join(random.choices(string.digits, k=4)) +
+            random.choice(string.ascii_uppercase)
+        )
+        if pan not in USED_PAN:
+            USED_PAN.add(pan)
+            return pan
 
-    # Save
-    img.save(DATASET_DIR / "aadhaar" / f"syn_aadhaar_{index}.jpg")
+def validate_aadhaar(a):
+    clean = a.replace(" ", "")
+    return clean.isdigit() and len(clean) == 12
 
-def create_pan(index):
-    # PAN Cards usually light blue patterns
-    bg_color = (random.randint(200, 240), random.randint(230, 255), random.randint(240, 255))
-    img = Image.new('RGB', (400, 250), bg_color)
-    draw = ImageDraw.Draw(img)
-    
+def validate_pan(p):
+    return bool(re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", p))
+
+# ================= AADHAAR =================
+def create_aadhaar(i):
+    img = Image.new("RGB", (400, 250), (245, 245, 245))
+    d = ImageDraw.Draw(img)
+
     # Header
-    draw.text((150, 10), "INCOME TAX DEPARTMENT", font=get_random_font(15), fill="black")
-    draw.text((170, 30), "GOVT. OF INDIA", font=get_random_font(12), fill="black")
-    
-    # Photo & QR Placeholders
-    draw.rectangle([(10, 60), (90, 160)], fill="gray", outline="black") # Photo
-    draw.rectangle([(310, 60), (390, 140)], fill="white", outline="black") # QR
-    
+    d.text((110, 10), "Government of India", font=get_font(16), fill="black")
+
+    # Photo
+    d.rectangle((20, 70, 100, 160), fill="gray")
+
     # Details
-    draw.text((110, 70), "Name", font=get_random_font(10), fill="black")
-    draw.text((110, 85), random_text(20), font=get_random_font(16), fill="black")
-    
-    draw.text((110, 110), "Father's Name", font=get_random_font(10), fill="black")
-    draw.text((110, 125), random_text(20), font=get_random_font(16), fill="black")
-    
-    draw.text((110, 150), "Date of Birth", font=get_random_font(10), fill="black")
-    draw.text((110, 165), random_date(), font=get_random_font(16), fill="black")
-    
-    # PAN Number (Unique feature: 10 chars)
-    pan_num = random_text(10)
-    font_pan = get_random_font(22)
-    # Center the PAN number a bit
-    draw.text((120, 200), pan_num, font=font_pan, fill="black")
-    
-    img.save(DATASET_DIR / "pan" / f"syn_pan_{index}.jpg")
+    d.text((120, 70), "Name: " + random.choice(["RAHUL", "ANITA", "SUNIL", "PRIYA"]), font=get_font(14), fill="black")
+    d.text((120, 100), "DOB: " + random_date(), font=get_font(14), fill="black")
 
-def create_payment_receipt(index):
-    # White background usually
-    img = Image.new('RGB', (350, 600), "white")
-    draw = ImageDraw.Draw(img)
-    
-    # Green success circle often seen
-    draw.ellipse([(150, 50), (200, 100)], fill=(30, 200, 30))
-    
-    # Amount
-    amount = f"₹{random.randint(1, 10000)}.{random.randint(0,99):02d}"
-    font_large = get_random_font(30)
-    draw.text((120, 120), amount, font=font_large, fill="black")
-    
-    # "Paid to"
-    draw.text((100, 170), "Paid to " + random_text(10).title(), font=get_random_font(18), fill="black")
-    
-    # Transaction Details box
-    start_y = 250
-    draw.line([(20, start_y), (330, start_y)], fill="gray")
-    
-    details = [
-        ("Txn ID", "T" + random_text(12, True)),
-        ("Ref No", random_text(10, True)),
-        ("Date", random_date() + f" {random.randint(0,23):02d}:{random.randint(0,59):02d}"),
-        ("Status", "Successful")
-    ]
-    
-    for i, (label, val) in enumerate(details):
-        y = start_y + 20 + (i * 40)
-        draw.text((30, y), label, font=get_random_font(14), fill="gray")
-        draw.text((200, y), val, font=get_random_font(14), fill="black")
-        
-    # App Logos (simulated with text)
-    app_name = random.choice(["PhonePe", "Google Pay", "Paytm", "BHIM"])
-    draw.text((130, 550), f"Powered by {app_name}", font=get_random_font(12), fill="gray")
-    
-    img.save(DATASET_DIR / "payment_receipt" / f"syn_receipt_{index}.jpg")
+    # Aadhaar number
+    aadhaar = generate_unique_aadhaar()
+    assert validate_aadhaar(aadhaar)
+    d.text((80, 200), aadhaar, font=get_font(22), fill="black")
 
-def create_other(index):
-    # Completely random
-    img_type = random.choice(["noise", "shapes", "gradient"])
-    
-    if img_type == "noise":
-        arr = np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
-        img = Image.fromarray(arr)
-        
-    elif img_type == "shapes":
-        bg = random_color()
-        img = Image.new('RGB', (224, 224), bg)
-        draw = ImageDraw.Draw(img)
-        for _ in range(random.randint(3, 10)):
-            x1 = random.randint(0, 200)
-            y1 = random.randint(0, 200)
-            draw.rectangle([x1, y1, x1+random.randint(10,50), y1+random.randint(10,50)], fill=random_color())
-            draw.ellipse([x1, y1, x1+random.randint(10,50), y1+random.randint(10,50)], fill=random_color())
-            
-    else: # Gradient-ish
-        img = Image.new('RGB', (224, 224), random_color())
-        draw = ImageDraw.Draw(img)
-        for i in range(0, 224, 20):
-            draw.line([(i, 0), (224-i, 224)], fill=random_color(), width=5)
-            
-    # Add some random text unrelated to docs
-    draw = ImageDraw.Draw(img)
-    if random.choice([True, False]):
-        draw.text((50, 100), random.choice(["CAT", "DOG", "TREE", "CAR", "SKY", "VACATION"]), font=get_random_font(25), fill=random_color())
+    img.save(DATASET_DIR / "aadhaar" / f"aadhaar_{i}.jpg")
 
-    img.save(DATASET_DIR / "other" / f"syn_other_{index}.jpg")
+# ================= PAN =================
+def create_pan(i):
+    img = Image.new("RGB", (400, 250), (220, 235, 245))
+    d = ImageDraw.Draw(img)
 
-def generate(i):
-    # This function is called by the pool
-    # We use (index % 4) to distribute work, or just randomize
-    # Actually, the user wants 1000 of EACH.
-    # So we will run this 4000 times, but the main loop handles offsets.
-    pass 
+    d.text((120, 10), "INCOME TAX DEPARTMENT", font=get_font(14), fill="black")
+    d.text((150, 30), "GOVT. OF INDIA", font=get_font(12), fill="black")
 
-def worker(args):
-    idx, kind = args
-    if kind == "aadhaar":
-        create_aadhaar(idx)
-    elif kind == "pan":
-        create_pan(idx)
-    elif kind == "payment_receipt":
-        create_payment_receipt(idx)
-    elif kind == "other":
-        create_other(idx)
+    d.rectangle((20, 60, 90, 150), fill="gray")
+
+    d.text((120, 70), "Name", font=get_font(10), fill="black")
+    d.text((120, 85), random.choice(["RAJESH", "SNEHA", "AMIT"]), font=get_font(14), fill="black")
+
+    d.text((120, 110), "DOB", font=get_font(10), fill="black")
+    d.text((120, 125), random_date(), font=get_font(14), fill="black")
+
+    pan = generate_unique_pan()
+    assert validate_pan(pan)
+    d.text((120, 190), pan, font=get_font(22), fill="black")
+
+    img.save(DATASET_DIR / "pan" / f"pan_{i}.jpg")
+
+# ================= PAYMENT RECEIPT =================
+def create_payment_receipt(i):
+    img = Image.new("RGB", (350, 600), "white")
+    d = ImageDraw.Draw(img)
+
+    d.text((100, 50), "Payment Successful", font=get_font(22), fill="green")
+    d.text((100, 100), f"₹{random.randint(10,9999)}", font=get_font(26), fill="black")
+    d.text((80, 150), "Txn ID: TXN" + "".join(random.choices(string.digits, k=10)), font=get_font(14), fill="black")
+
+    img.save(DATASET_DIR / "payment_receipt" / f"receipt_{i}.jpg")
+
+# ================= OTHER =================
+def create_other(i):
+    img = Image.fromarray(np.random.randint(0,255,(224,224,3),dtype=np.uint8))
+    d = ImageDraw.Draw(img)
+    d.text((40, 100), random.choice(["CAT", "TREE", "RANDOM"]), font=get_font(24), fill=random_color())
+    img.save(DATASET_DIR / "other" / f"other_{i}.jpg")
+
+# ================= MULTIPROCESS =================
+def worker(task):
+    i, cls = task
+    if cls == "aadhaar":
+        create_aadhaar(i)
+    elif cls == "pan":
+        create_pan(i)
+    elif cls == "payment_receipt":
+        create_payment_receipt(i)
+    else:
+        create_other(i)
 
 if __name__ == "__main__":
     tasks = []
-    print(f"Generating {IMAGES_PER_CLASS} images per class...")
-    
     for i in range(IMAGES_PER_CLASS):
-        tasks.append((i, "aadhaar"))
-        tasks.append((i, "pan"))
-        tasks.append((i, "payment_receipt"))
-        tasks.append((i, "other"))
-        
-    # Use multiprocessing to speed it up
-    with Pool(processes=cpu_count()) as pool:
-        pool.map(worker, tasks)
-        
-    print("Done! Generated 4000 images.")
+        for c in CLASSES:
+            tasks.append((i, c))
+
+    with Pool(cpu_count()) as p:
+        p.map(worker, tasks)
+
+    print("✅ Dataset generated with VALID Aadhaar & PAN numbers")
