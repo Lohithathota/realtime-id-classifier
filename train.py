@@ -18,11 +18,11 @@ VAL_DIR = DATASET_DIR / "val"
 MODEL_SAVE_PATH = "model.pth"
 
 # Training hyperparameters
-BATCH_SIZE = 16
-LEARNING_RATE = 0.0001
-NUM_EPOCHS = 20
+BATCH_SIZE = 64
+LEARNING_RATE = 0.001
+NUM_EPOCHS = 5
 DEVICE = torch.device("cpu")
-PATIENCE = 5
+PATIENCE = 3
 
 # Image preprocessing transforms
 TRAIN_TRANSFORM = transforms.Compose([
