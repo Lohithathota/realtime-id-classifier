@@ -247,6 +247,66 @@ async def predict_image(file: UploadFile = File(...)) -> Dict[str, Any]:
         )
 
 
+# --- OCR ENDPOINT ---
+from ocr_engine import process_document
+
+@app.post("/predict_with_ocr", tags=["Prediction"])
+async def predict_image_with_ocr(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """
+    Classify and perform OCR on an uploaded image.
+    Only runs OCR if the image is classified as 'aadhaar' or 'pan'.
+    """
+    if model is None:
+        raise HTTPException(status_code=503, detail="Model not available")
+    
+    try:
+        # 1. Read File
+        contents = await file.read()
+        if not contents or len(contents) > 10 * 1024 * 1024:
+             raise HTTPException(status_code=400, detail="Invalid file size or empty")
+        
+        if not is_valid_image(contents):
+             raise HTTPException(status_code=400, detail="Invalid image format")
+             
+        image_file = io.BytesIO(contents)
+        
+        # 2. Classification
+        image_tensor = preprocess_image(io.BytesIO(contents)) # Create fresh stream
+        predicted_class, class_idx, confidence = predict(model, image_tensor)
+        
+        # Basic response structure
+        response = {
+            "classification": {
+                "predicted_class": predicted_class,
+                "confidence": round(confidence * 100, 2),
+                "display_name": DISPLAY_NAMES.get(class_idx, predicted_class)
+            },
+            "ocr_data": None,
+            "message": "OCR not performed for this document type"
+        }
+
+        # 3. OCR if applicable
+        if confidence >= CONFIDENCE_THRESHOLD_LOW and predicted_class in ['aadhaar', 'pan']:
+            # Reset stream for OCR
+            image_file.seek(0)
+            ocr_result = process_document(image_file, predicted_class)
+            response['ocr_data'] = ocr_result
+            response['message'] = f"OCR performed for {predicted_class}"
+            
+            # If classification was high confidence but OCR failed completely, warning?
+            if ocr_result['ocr_status'] == 'FAIL':
+                 response['message'] += " (OCR Failed)"
+        
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"OCR Pipeline Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
 @app.get("/docs", include_in_schema=False)
 async def get_docs():
     """
