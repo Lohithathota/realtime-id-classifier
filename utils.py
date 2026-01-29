@@ -5,8 +5,11 @@ Utility functions for model loading, image preprocessing, and inference.
 import torch
 import torchvision.transforms as transforms
 from PIL import Image
+import cv2
+import numpy as np
+import io
 from pathlib import Path
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any
 
 
 # Device configuration (CPU-only for compatibility)
@@ -37,7 +40,7 @@ DISPLAY_NAMES = {
     1: "Unknown / Not Supported Document",
     2: "PAN",
     3: "Payment Receipt"
-}
+}   
 
 # Inverse mapping for optional filename matching
 CLASS_TO_IDX = {v: k for k, v in CLASS_NAMES.items()}
@@ -152,3 +155,60 @@ def check_filename_match(filename: str, predicted_class: str) -> bool:
     """
     filename_lower = filename.lower()
     return predicted_class.lower() in filename_lower
+
+
+def is_blue_dominant(image_file, threshold: float = 0.05) -> bool:
+    """
+    Analyze the image to detect if blue is a significant color.
+    Used to verify PAN card classification (PAN cards are typically blue).
+    
+    Args:
+        image_file: PIL Image, file-like object, or bytes
+        threshold: Minimum percentage of blue pixels to return True
+        
+    Returns:
+        bool: True if blue color exceeds the threshold
+    """
+    try:
+        # Load image into OpenCV format (BGR)
+        if isinstance(image_file, Image.Image):
+            pil_img = image_file.convert('RGB')
+        elif isinstance(image_file, (io.BytesIO, bytes)):
+            if isinstance(image_file, io.BytesIO):
+                image_file.seek(0)
+                file_bytes = image_file.read()
+            else:
+                file_bytes = image_file
+            pil_img = Image.open(io.BytesIO(file_bytes)).convert('RGB')
+        else:
+            # Assume it's a file path or similar
+            pil_img = Image.open(image_file).convert('RGB')
+            
+        # Convert PIL (RGB) to OpenCV (BGR)
+        img_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        
+        # Convert to HSV color space
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        
+        # Define range of blue color in HSV
+        # Note: Tuned for typical blue PAN backgrounds
+        lower_blue = np.array([90, 50, 50])
+        upper_blue = np.array([130, 255, 255])
+        
+        # Threshold the HSV image to get only blue colors
+        mask = cv2.inRange(hsv, lower_blue, upper_blue)
+        
+        # Calculate percentage of blue pixels
+        blue_pixel_count = cv2.countNonZero(mask)
+        total_pixels = hsv.shape[0] * hsv.shape[1]
+        blue_ratio = blue_pixel_count / total_pixels
+        
+        from ocr_engine import logger
+        logger.info(f"Blue color analysis: {blue_ratio:.2%} blue pixels (threshold: {threshold:.2%})")
+        
+        return blue_ratio >= threshold
+        
+    except Exception as e:
+        from ocr_engine import logger
+        logger.error(f"Color analysis failed: {e}")
+        return True # Default to True on failure to avoid false rejections
