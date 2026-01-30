@@ -3,6 +3,19 @@ import pytesseract
 from PIL import Image
 import io
 from collections import Counter
+import os
+
+# Configure Tesseract path for Windows
+if os.name == 'nt':
+    tesseract_paths = [
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+        os.path.join(os.environ.get('USERPROFILE', ''), r'AppData\Local\Tesseract-OCR\tesseract.exe')
+    ]
+    for path in tesseract_paths:
+        if os.path.exists(path):
+            pytesseract.pytesseract.tesseract_cmd = path
+            break
 
 # ===============================
 # VERHOEFF (AADHAAR)
@@ -33,108 +46,132 @@ class Verhoeff:
 # ===============================
 def extract_name_universal(data, document_type=None):
     """
-    Extracts name using confidence-filtered OCR data.
-    For Aadhaar: Only considers text from RIGHT side (photo is on left).
+    Extracts name using layout-aware line grouping and proximity to DOB/Gender.
+    - Aadhaar: Title Case lines above DOB/Gender.
+    - PAN: ALL CAPS lines above Father's Name/DOB.
     """
     n = len(data["text"])
-    
-    # Calculate image width for positional filtering
-    image_width = max(data["left"][i] + data["width"][i] for i in range(n) if data["text"][i].strip())
-    right_threshold = image_width * 0.4  # Right 60% of image
-    
-    clean_words_with_meta = []
-    
-    # Filter by confidence and validity
-    bad_words = {
-        'GOVERNMENT', 'INDIA', 'UIDAI', 'AADHAAR', 'PAN', 'CARD', 'DOB', 'YEAR',
-        'FATHER', 'ADDRESS', 'STATE', 'DISTRICT', 'PINCODE', 'PO', 'MALE', 
-        'FEMALE', 'INCOME', 'TAX', 'DEPARTMENT', 'PERMANENT', 'ACCOUNT',
-        'NUMBER', 'NAME', 'DATE', 'BIRTH', 'ISSUE', 'VALID', 'DIGILOCKER',
-        'AUTHORITY', 'UNIQUE', 'IDENTIFICATION'  # Common left-side text
-    }
+    if n == 0: return None
 
-    for i in range(n):
-        word = data["text"][i].strip().upper()
-        conf = int(data["conf"][i])
-        left_pos = data["left"][i]
-        
-        # For Aadhaar, only consider RIGHT side text
-        if document_type == "Aadhaar Card" and left_pos < right_threshold:
-            continue
-        
-        # Strict filter: Must be alpha, >2 chars, high confidence > 60
-        if (conf > 60 and 
-            len(word) > 2 and 
-            word.isalpha() and 
-            word not in bad_words):
-            
-            clean_words_with_meta.append(word)
+    # 1. Group words into lines
+    lines_meta = []
+    word_indices = sorted(range(n), key=lambda i: (data["top"][i], data["left"][i]))
+    
+    current_line = []
+    last_top = -1
+    threshold = 12 
+    
+    for i in word_indices:
+        word = data["text"][i].strip()
+        if not word: continue
+        top = data["top"][i]
+        if last_top == -1 or abs(top - last_top) <= threshold:
+            current_line.append(i)
+        else:
+            lines_meta.append(current_line)
+            current_line = [i]
+        last_top = top
+    if current_line: lines_meta.append(current_line)
 
-    if len(clean_words_with_meta) < 2:
-        return None
+    lines_text = []
+    for line_indices in lines_meta:
+        line_indices = sorted(line_indices, key=lambda i: data["left"][i])
+        text = " ".join([data["text"][i] for i in line_indices])
+        lines_text.append({"text": text.strip(), "top": data["top"][line_indices[0]]})
+
+    bad_keywords = {'GOVERNMENT', 'INDIA', 'UIDAI', 'AADHAAR', 'PAN', 'CARD', 'FATHER', 
+                    'INCOME', 'TAX', 'DEPARTMENT', 'ACCOUNT', 'NUMBER', 'IDENTIFICATION',
+                    'ADDRESS', 'ENROLMENT', 'MALE', 'FEMALE', 'DATE', 'GENDER', 'BIRTH'}
+
+    # 2. Find Anchor (DOB or Gender)
+    anchor_idx = -1
+    for idx, line in enumerate(lines_text):
+        normalized = line["text"].upper()
+        if re.search(r"\d{2}/\d{2}/\d{4}", normalized) or "MALE" in normalized or "FEMALE" in normalized:
+            anchor_idx = idx
+            break
+
+    # 3. Search backwards from anchor
+    search_limit = max(0, anchor_idx - 4) if anchor_idx != -1 else 0
+    candidate_lines = []
     
-    # Score words
-    word_scores = {}
-    for word in clean_words_with_meta:
-        score = 0
-        if len(word) >= 4: score += 3
-        if word[0] in 'ABCDJKMPSRT': score += 2
-        word_scores[word] = score
-        
-    # Sort by score
-    sorted_words = sorted(word_scores.items(), key=lambda x: x[1], reverse=True)
-    candidate_words = [w[0] for w in sorted_words[:4]]
-    
-    # Try 2-3 word combinations
-    for length in range(2, min(4, len(candidate_words)+1)):
-        name = ' '.join(candidate_words[:length])
-        # Reasonable length check
-        if 10 <= len(name) <= 25:
-            return name
-            
-    return None
+    start_idx = anchor_idx - 1 if anchor_idx != -1 else len(lines_text) - 1
+    for i in range(start_idx, search_limit - 1, -1):
+        line = lines_text[i]["text"]
+        normalized = line.upper()
+        if any(k in normalized for k in bad_keywords): continue
+        if not any(c.isalpha() for c in line): continue
+        if len(line) < 3: continue
+        candidate_lines.append(line)
+
+    if not candidate_lines: return None
+
+    # 4. Filter based on Doc Type specifics
+    if document_type == "PAN Card":
+        # Usually ALL CAPS
+        for line in candidate_lines:
+            if line.isupper() and len(line.split()) >= 1:
+                return line
+    elif document_type == "Aadhaar Card":
+        # Usually Title Case
+        for line in candidate_lines:
+            words = line.split()
+            if all(w[0].isupper() for w in words if w[0].isalpha()):
+                return line
+
+    return candidate_lines[0] # Return closest valid line above anchor
 
 # ===============================
 # EXTRACTION FUNCTIONS
 # ===============================
 def extract_gender_simple(text):
+    """
+    Extracts gender using regex word boundaries to avoid substring issues 
+    (e.g., matching 'MALE' inside 'FEMALE').
+    """
     text = text.upper()
-    if "MALE" in text: return "MALE"
-    if "FEMALE" in text: return "FEMALE"
-    if "TRANSGENDER" in text: return "TRANSGENDER"
-    if "M " in text or " M" in text: return "MALE"
-    if "F " in text or " F" in text: return "FEMALE"
+    
+    # Check for FEMALE first or use boundaries to prevent 'MALE' substring match
+    if re.search(r"\bFEMALE\b", text): 
+        return "FEMALE"
+    if re.search(r"\bMALE\b", text): 
+        return "MALE"
+    if re.search(r"\bTRANSGENDER\b", text): 
+        return "TRANSGENDER"
+    
+    # Fallback for single characters with boundaries
+    if re.search(r"\bF\b", text): 
+        return "FEMALE"
+    if re.search(r"\bM\b", text): 
+        return "MALE"
+        
     return None
 
 def run_ocr(image_bytes):
     """
-    Run OCR with intelligent image preprocessing for optimal text extraction.
-    Handles large images by resizing while maintaining aspect ratio.
+    Run OCR once to get both text and position data, significantly improving performance.
+    Uses BILINEAR resizing for a better balance between speed and accuracy.
     """
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    
-    # Get original dimensions
     width, height = image.size
-    
-    # Optimal OCR size: 1200-1600px on longest side
     max_dimension = max(width, height)
     
+    # Resize logic (optimized filter)
     if max_dimension > 2000:
-        # Large image - resize to 1600px max
         scale = 1600 / max_dimension
-        new_width = int(width * scale)
-        new_height = int(height * scale)
-        image = image.resize((new_width, new_height), Image.LANCZOS)
+        image = image.resize((int(width * scale), int(height * scale)), Image.BILINEAR)
     elif max_dimension < 800:
-        # Small image - upscale to 1200px for better OCR
         scale = 1200 / max_dimension
-        new_width = int(width * scale)
-        new_height = int(height * scale)
-        image = image.resize((new_width, new_height), Image.LANCZOS)
+        image = image.resize((int(width * scale), int(height * scale)), Image.BILINEAR)
     
-    # Run OCR on optimized image
-    text = pytesseract.image_to_string(image, config="--psm 6").upper()
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    # SINGLE CALL to Tesseract (this is where the speed gain is)
+    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT, config="--psm 6")
+    
+    # Reconstruct text from the data dictionary
+    # Filter out empty strings and join with spaces
+    words = [w.strip() for w in data["text"] if w.strip()]
+    text = " ".join(words).upper()
+    
     return text, data
 
 def extract_aadhaar(text):
@@ -240,14 +277,17 @@ def identify_and_extract(image_file):
     
     # Now extract name with document type context
     name = extract_name_universal(data, document_type)
-    gender = extract_gender_simple(text)
+    gender = extract_gender_simple(text) if document_type != "PAN Card" else None
     dob = extract_dob(text)
     
     extracted = {
         "name": name,
-        "gender": gender,
         "dob_or_yob": dob
     }
+    
+    # Only include gender if it's not a PAN card
+    if document_type != "PAN Card":
+        extracted["gender"] = gender
     
     if aadhaar:
         extracted["aadhaar_number"] = aadhaar
@@ -262,28 +302,27 @@ def identify_and_extract(image_file):
     confidence_score = 0.0
     
     # Base score for document type identification (40%)
-    if aadhaar:
-        confidence_score += 0.40
-    elif pan:
+    if aadhaar or pan:
         confidence_score += 0.40
     elif is_aadhaar_text or is_pan_text:
-        confidence_score += 0.20  # Partial identification
+        confidence_score += 0.20
     
     # Name extraction quality (30%)
     if name:
-        name_length = len(name.replace(' ', ''))
-        if 10 <= name_length <= 25:
-            confidence_score += 0.30
-        elif 6 <= name_length < 10 or 25 < name_length <= 30:
-            confidence_score += 0.15  # Partial credit for borderline names
-    
-    # Gender extraction (10%)
-    if gender:
-        confidence_score += 0.10
+        confidence_score += 0.30
     
     # DOB extraction (20%)
     if dob:
         confidence_score += 0.20
+    
+    # Gender extraction (10%) - Only for non-PAN documents
+    if document_type != "PAN Card":
+        if gender:
+            confidence_score += 0.10
+    else:
+        # For PAN, redistribute the 10% to other critical fields (e.g., Number or Name)
+        if pan:
+            confidence_score += 0.10
     
     # Cap at 100%
     confidence_score = min(confidence_score, 1.0)

@@ -42,6 +42,10 @@ realtime-id-classifier/
 
 - Python 3.8 or higher
 - pip package manager
+- **Tesseract OCR**: Required for text extraction (OCR functionality)
+  - **Windows**: [Download Tesseract Installer](https://github.com/UB-Mannheim/tesseract/wiki) and install to `C:\Program Files\Tesseract-OCR`.
+  - **Ubuntu/Linux**: `sudo apt install tesseract-ocr`
+  - **macOS**: `brew install tesseract`
 
 ### 2. Create Virtual Environment (Recommended)
 
