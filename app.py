@@ -17,7 +17,7 @@ import logging
 from typing import Dict, Any
 import io
 
-from ocr_engine import identify_and_extract
+from ocr_engine import identify_and_extract, extract_all_text
 
 
 # Setup logging
@@ -62,6 +62,28 @@ async def extract_document(file: UploadFile = File(...)) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error(f"Processing Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ocr", tags=["General"])
+async def generic_ocr(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """
+    Generic endpoint to extract all readable text from any image.
+    No document-specific rules are applied.
+    """
+    try:
+        contents = await file.read()
+        if not contents or not is_valid_image(contents):
+             raise HTTPException(status_code=400, detail="Invalid image file format.")
+             
+        # Generic Text Extraction
+        result = extract_all_text(io.BytesIO(contents))
+        
+        logger.info(f"Generic OCR complete. Status: {result['status']} | Word Count: {result['word_count']}")
+        return result
+
+    except Exception as e:
+        logger.error(f"OCR Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

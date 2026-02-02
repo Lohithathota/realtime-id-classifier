@@ -114,16 +114,32 @@ def extract_name_universal(data, document_type=None):
 
     # ---- SEARCH ABOVE ANCHOR ----
     candidates = []
-    for i in range(anchor - 1, max(-1, anchor - 6), -1):
+    for i in range(anchor - 1, max(-1, anchor - 8), -1):
         raw = lines_text[i]
-        clean = normalize(raw)
-        if not clean:
+        clean_full = normalize(raw)
+        
+        # Instead of skipping the line if a blacklist word exists, 
+        # let's remove the blacklist words to see if a name remains.
+        current_candidate = clean_full
+        for k in blacklist:
+            current_candidate = re.sub(r'\b' + k + r'\b', '', current_candidate).strip()
+            
+        if not current_candidate:
             continue
-        if any(k in clean for k in blacklist):
-            continue
-        if not is_valid_name(clean):
-            continue
-        candidates.append(clean)
+            
+        if is_valid_name(current_candidate):
+            candidates.append(current_candidate)
+            break # Found the closest valid name
+
+    # ---- FALLBACK: SEARCH FOR "TO" ANCHOR (Full Letter Support) ----
+    if not candidates:
+        for i, line in enumerate(lines_text):
+            if line.upper().startswith("TO"):
+                # Usually the name is the very next line
+                if i + 1 < len(lines_text):
+                    clean_fallback = normalize(lines_text[i+1])
+                    if is_valid_name(clean_fallback):
+                         return clean_fallback.title() if document_type == "Aadhaar Card" else clean_fallback
 
     if not candidates:
         return None
@@ -150,15 +166,17 @@ def run_ocr(image_bytes):
     w, h = image.size
     m = max(w, h)
 
-    if m > 2000:
-        s = 1600 / m
-        image = image.resize((int(w * s), int(h * s)), Image.BILINEAR)
-    elif m < 800:
-        s = 1200 / m
-        image = image.resize((int(w * s), int(h * s)), Image.BILINEAR)
+    # For very long/large documents, we only downscale if it's over 3000px 
+    # to preserve clarity of small text in columns.
+    if m > 3000:
+        s = 2500 / m
+        image = image.resize((int(w * s), int(h * s)), Image.Resampling.LANCZOS)
+    elif m < 1000:
+        s = 1500 / m
+        image = image.resize((int(w * s), int(h * s)), Image.Resampling.LANCZOS)
 
     data = pytesseract.image_to_data(
-        image, output_type=pytesseract.Output.DICT, config="--psm 6"
+        image, output_type=pytesseract.Output.DICT, config="--psm 3"
     )
 
     text = " ".join(w.strip() for w in data["text"] if w.strip()).upper()
@@ -246,4 +264,35 @@ def identify_and_extract(image_file):
         "document_type": doc_type,
         "validation_status": "VALID" if aadhaar or pan else "PARTIAL",
         "extracted_fields": extracted
+    }
+
+
+def extract_all_text(image_file):
+    """
+    Generic OCR extraction that preserves line structure and layout.
+    Returns: { full_text: string, lines: list[string], word_count: int }
+    """
+    image_bytes = image_file.read()
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    
+    # Optimization for general text
+    w, h = image.size
+    m = max(w, h)
+    if m > 2500:
+        s = 2500 / m
+        image = image.resize((int(w * s), int(h * s)), Image.Resampling.LANCZOS)
+
+    # Use image_to_string for better layout preservation than image_to_data
+    # --psm 3 = Fully automatic page segmentation, but no OSD.
+    full_text = pytesseract.image_to_string(image, config="--psm 3").strip()
+    
+    # Clean and split into lines
+    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+    normalized_text = "\n".join(lines)
+    
+    return {
+        "full_text": normalized_text,
+        "lines": lines,
+        "word_count": len(normalized_text.split()),
+        "status": "SUCCESS" if normalized_text else "EMPTY"
     }
