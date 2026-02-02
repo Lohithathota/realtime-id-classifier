@@ -3,6 +3,8 @@ import pytesseract
 from PIL import Image
 import io
 import os
+import cv2
+import numpy as np
 
 # ===============================
 # TESSERACT CONFIG (WINDOWS)
@@ -152,31 +154,53 @@ def extract_name_universal(data, document_type=None):
 # ===============================
 def extract_gender_simple(text):
     text = text.upper()
-    if re.search(r"\bFEMALE\b", text):
+    
+    # Fuzzy matching for FEMALE (handles PEMALE, EEMALE, FEMAL, etc.)
+    if re.search(r"\b[FPE][E]?MALE\b|\bFEMAL[EZ]\b", text):
         return "FEMALE"
-    if re.search(r"\bMALE\b", text):
+    
+    # Fuzzy matching for MALE (specifically avoiding being caught by FEMALE logic)
+    # Checks for MALE, VALE, MAIE, but NOT if preceded by FE/PE
+    if re.search(r"(?<!FE)(?<!PE)\b[MV][A]?L[EI]\b", text):
         return "MALE"
-    if re.search(r"\bTRANSGENDER\b", text):
+        
+    if re.search(r"\bTRANS[G]?ENDER\b", text):
         return "TRANSGENDER"
+        
     return None
 
 
 def run_ocr(image_bytes):
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    w, h = image.size
-    m = max(w, h)
+    """
+    Advanced OCR that cleans images before processing.
+    Ensures watermarks and background textures don't block text.
+    """
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if img is None:
+        return "", {"text": []}
 
-    # For very long/large documents, we only downscale if it's over 3000px 
-    # to preserve clarity of small text in columns.
-    if m > 3000:
-        s = 2500 / m
-        image = image.resize((int(w * s), int(h * s)), Image.Resampling.LANCZOS)
-    elif m < 1000:
-        s = 1500 / m
-        image = image.resize((int(w * s), int(h * s)), Image.Resampling.LANCZOS)
+    # 1. High-Precision Scaling
+    h, w = img.shape[:2]
+    max_dim = max(h, w)
+    # Target 3000px for full A4 pages to catch tiny card text
+    if max_dim < 3000:
+        scale = 3000 / max_dim
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
 
+    # 2. Image Cleaning
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.convertScaleAbs(gray, alpha=1.5, beta=0) # Contrast boost
+    
+    # Adaptive thresholding to remove watermarks/shadows
+    processed = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15
+    )
+
+    # 3. OCR execution
     data = pytesseract.image_to_data(
-        image, output_type=pytesseract.Output.DICT, config="--psm 3"
+        processed, output_type=pytesseract.Output.DICT, config="--psm 3"
     )
 
     text = " ".join(w.strip() for w in data["text"] if w.strip()).upper()
@@ -184,22 +208,44 @@ def run_ocr(image_bytes):
 
 
 def extract_aadhaar(text):
-    text = text.translate(str.maketrans("OISZB", "01528"))
-    patterns = re.findall(r"\b\d{4}\s?\d{4}\s?\d{4}\b", text)
-    for p in patterns:
-        num = re.sub(r"\D", "", p)
-        if len(num) == 12 and Verhoeff.validate(num):
-            return num
+    # Normalize potential OCR confusion (O -> 0, I -> 1, etc.)
+    clean_text = text.translate(str.maketrans("OISZBQG", "0152806"))
+    # Look for 12 digits (with optional spaces)
+    patterns = re.findall(r"\b\d{4}\s?\d{4}\s?\d{4}\b", clean_text)
+    
+    valid_numbers = []
     for p in patterns:
         num = re.sub(r"\D", "", p)
         if len(num) == 12:
-            return num
-    return None
+            if Verhoeff.validate(num):
+                return num # Highly confident
+            valid_numbers.append(num)
+            
+    return valid_numbers[0] if valid_numbers else None
 
 
 def extract_pan(text):
+    # PANs often get '0' and 'O' mixed up in the middle or end
+    # First, try strict match
     m = re.search(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", text)
-    return m.group(0) if m else None
+    if m:
+        return m.group(0)
+        
+    # Fallback: OCR might have misread a '0' as 'O' or vice versa
+    # We look for the 5-4-1 structure and fix the middle digits
+    potential = re.findall(r"\b[A-Z0-9]{5}[A-Z0-9]{4}[A-Z0-9]\b", text)
+    for p in potential:
+        # Check if it likely fits the PAN structure (5 letters, 4 numbers, 1 letter)
+        # by forcing translation on the middle part
+        prefix = p[:5].replace('0', 'O').replace('1', 'I')
+        middle = p[5:9].replace('O', '0').replace('I', '1').replace('S', '5').replace('B', '8')
+        suffix = p[9:].replace('0', 'O').replace('1', 'I')
+        
+        final_pan = prefix + middle + suffix
+        if re.match(r"[A-Z]{5}[0-9]{4}[A-Z]", final_pan):
+            return final_pan
+            
+    return None
 
 
 def extract_dob(text):
@@ -269,22 +315,42 @@ def identify_and_extract(image_file):
 
 def extract_all_text(image_file):
     """
-    Generic OCR extraction that preserves line structure and layout.
-    Returns: { full_text: string, lines: list[string], word_count: int }
+    High-precision generic OCR extraction for complex documents (like Aadhaar letters).
+    Uses OpenCV for adaptive thresholding and noise reduction.
     """
+    # 1. Load image
     image_bytes = image_file.read()
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
-    # Optimization for general text
-    w, h = image.size
-    m = max(w, h)
-    if m > 2500:
-        s = 2500 / m
-        image = image.resize((int(w * s), int(h * s)), Image.Resampling.LANCZOS)
+    if img is None:
+        return {"status": "ERROR", "message": "Could not decode image"}
 
-    # Use image_to_string for better layout preservation than image_to_data
-    # --psm 3 = Fully automatic page segmentation, but no OSD.
-    full_text = pytesseract.image_to_string(image, config="--psm 3").strip()
+    # 2. Advanced Scaling (Crucial for A4 sheets with tiny text)
+    h, w = img.shape[:2]
+    max_dim = max(h, w)
+    if max_dim < 3000:
+        scale = 3000 / max_dim
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
+
+    # 3. Pre-processing for "Dirty" or Complex Backgrounds
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Increase contrast
+    gray = cv2.convertScaleAbs(gray, alpha=1.5, beta=0)
+    
+    # Adaptive Thresholding (removes gray watermarks and background patterns)
+    processed = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15
+    )
+    
+    # Denoising
+    kernel = np.ones((1, 1), np.uint8)
+    processed = cv2.morphologyEx(processed, cv2.MORPH_OPEN, kernel)
+
+    # 4. OCR with Layout Analysis
+    # --psm 3: Automatic page segmentation with OSD. 
+    full_text = pytesseract.image_to_string(processed, config="--psm 3").strip()
     
     # Clean and split into lines
     lines = [line.strip() for line in full_text.split('\n') if line.strip()]
